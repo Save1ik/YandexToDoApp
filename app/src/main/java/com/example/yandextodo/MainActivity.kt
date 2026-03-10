@@ -1,50 +1,102 @@
 package com.example.yandextodo
 
 import android.os.Bundle
-import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.lifecycle.lifecycleScope
+import androidx.navigation.NavType
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.rememberNavController
+import androidx.navigation.navArgument
+import com.example.yandextodo.api.ToDoApiService
+import com.example.yandextodo.database.RoomRepository
+import com.example.yandextodo.database.ToDoDatabase
 import com.example.yandextodo.screens.ItemScreen
+import com.example.yandextodo.screens.ListScreen
 import com.example.yandextodo.ui.theme.YandexToDoTheme
-import java.io.File
-import java.time.LocalDateTime
+import kotlinx.coroutines.launch
 
+
+sealed class Screen(val route: String) {
+    object TodoList : Screen("todo_list")
+    object TodoItem : Screen("todo_item/{itemId}") {
+        fun createRoute(itemId: String?) = "todo_item/${itemId ?: "new"}"
+    }
+}
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        val file = File(this.filesDir, "items.json")
-        val fileStorage = FileStorage(file)
-        val item1 = ToDoItem(text = "Дело 1",
-            color = Color.Red,
-            importance = Importance.hight,
-            deadline = LocalDateTime.now())
-        val item2 = ToDoItem(text = "Дело 2",
-            importance = Importance.medium)
-        Log.d("My logs", fileStorage.itemList.toString())
-        fileStorage.addItem(item1)
-        fileStorage.addItem(item2)
-        Log.d("My logs", fileStorage.itemList.toString())
-        fileStorage.saveItems()
-        fileStorage.removeItem(item1.uid)
-        Log.d("My logs", fileStorage.itemList.toString())
-        fileStorage.loadFromFile()
-        Log.d("My logs", fileStorage.itemList.toString())
+
+        val BASE_URL = "https://hive.mrdekk.ru/todo/"
+        val BEARER_TOKEN = "c6c66fbf-397e-4a2f-9804-4d2c0974eb8a"
+
+        val database = ToDoDatabase.getDatabase(this)
+        val toDoItemDao = database.toDoItemDao()
+        val roomRepository = RoomRepository(toDoItemDao)
+        val apiService = ToDoApiService(BASE_URL, BEARER_TOKEN)
+        val backend = BackendService(apiService)
+        val repository = Repository(backend, roomRepository)
+
+
+
+        lifecycleScope.launch {
+            try {
+                repository.syncLocalToServer()
+            } catch (e: Exception) {
+                println("Initial sync failed: ${e.message}")
+            }
+        }
 
         setContent {
             YandexToDoTheme {
-                // A surface container using the 'background' color from the theme
-                Surface(
-                    modifier = Modifier.fillMaxSize(),
-                    color = MaterialTheme.colorScheme.background
+                val todoItems by repository.getItemsStateFlow().collectAsState()
+
+                val navController = rememberNavController()
+
+                NavHost(
+                    navController = navController,
+                    startDestination = Screen.TodoList.route
                 ) {
-                    ItemScreen()
+                    composable(Screen.TodoList.route) {
+                        ListScreen(
+                            todoItems = todoItems,
+                            onItemClick = { itemId ->
+                                navController.navigate(Screen.TodoItem.createRoute(itemId))
+                            },
+                            onAddClick = {
+                                navController.navigate(Screen.TodoItem.createRoute(null))
+                            },
+                            onDeleteItem = {
+                                    itemId -> repository.deleteItem(itemId)
+                            }
+                        )
+                    }
+
+                    composable(
+                        route = Screen.TodoItem.route,
+                        arguments = listOf(navArgument("itemId") { type = NavType.StringType })
+                    ) { backStackEntry ->
+                        val itemId = backStackEntry.arguments?.getString("itemId")
+                        val item = if (itemId == "new") null else todoItems.firstOrNull { it.uid == itemId }
+
+                        ItemScreen(
+                            item = item,
+                            onSave = { newItem ->
+                                if (itemId == "new") {
+                                    repository.addItem(newItem)
+                                } else {
+                                    repository.updateItem(newItem)
+                                }
+                                navController.popBackStack()
+                            },
+                            onBack = { navController.popBackStack() }
+                        )
+                    }
                 }
             }
         }
